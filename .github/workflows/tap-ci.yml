@@ -38,9 +38,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      # TODO(pin, runbook §8 first-release checklist): pin to a full commit SHA.
+      # Pinned to a full commit SHA (actions/checkout v4.4.0, runbook §8 step 0).
       - name: Checkout (full history for diff against main)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -163,6 +163,13 @@ jobs:
             desc "Offline reader for your own medical records"
             homepage "https://advoura.com/"
 
+            livecheck do
+              url "https://downloads.advoura.com/releases/latest.json"
+              strategy :json do |json|
+                json["version"]
+              end
+            end
+
             # Apple Silicon only. `aarch64` is hard-coded in the URL above, and this
             # stanza is what actually refuses an Intel Mac.
             depends_on arch: :arm64
@@ -180,16 +187,9 @@ jobs:
             # directory cache live. Only ordinary OS-level app traces below.
             zap trash: [
               "~/Library/Caches/com.advoura",
-              "~/Library/Saved Application State/com.advoura.savedState",
               "~/Library/HTTPStorages/com.advoura",
+              "~/Library/Saved Application State/com.advoura.savedState",
             ]
-
-            livecheck do
-              url "https://downloads.advoura.com/releases/latest.json"
-              strategy :json do |json|
-                json["version"]
-              end
-            end
           end
           TEMPLATE_EOF
           VERSION="$(sed -nE 's/^  version "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' Casks/advoura.rb)"
@@ -300,11 +300,10 @@ jobs:
           fi
 
       # Step 6, last: only now is the cask evaluated as Ruby.
-      # TODO(pin, runbook §8 first-release checklist): replace @master with a
-      # full commit SHA of Homebrew/actions. Not resolved offline when this
-      # file was written; do not guess one.
+      # Pinned to a full commit SHA of Homebrew/actions `main` (the repo renamed
+      # master -> main, so @master no longer resolves). Runbook §8 step 0.
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@dc7099b3e807f1e2ecc61f3ecabc840eedd5586a 
+        uses: Homebrew/actions/setup-homebrew@dc7099b3e807f1e2ecc61f3ecabc840eedd5586a # main, 2026-10-04
 
       - name: Tap this checkout as advoura/tap
         run: |
