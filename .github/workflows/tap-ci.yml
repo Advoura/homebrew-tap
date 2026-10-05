@@ -1,0 +1,330 @@
+# Required status check for advoura/homebrew-tap's branch protection on
+# `main`. This job is the only thing between a leaked cask-bump token and a
+# cask that points customers at bytes Advoura never published, or that runs
+# arbitrary code on their Mac. So every check is written inline, reads the
+# cask as plain text, and calls no script from this repository: a PR can
+# change any file outside .github/workflows/, and the token that opens
+# cask-bump PRs has no Workflows permission, so it cannot change this file.
+#
+# Steps run IN ORDER and the job fails on the first that does not hold:
+#   1   scope: only Casks/advoura.rb changes; an existing cask may change
+#       only its version line and its sha256 line, in place.
+#   1b  first cask (main has none yet): must equal the template below,
+#       apart from the version and sha256 values.
+#   2-4 url host and path, and sha256 against the published SHA256SUMS.txt.
+#   5   no downgrade (numeric, field by field).
+#   6   only then is the cask evaluated as Ruby: brew style, brew audit.
+# Everything runs in this one job, on macos-latest (brew audit belongs on
+# macOS). It is deliberately not split into dependent jobs: a required check
+# whose job is skipped because a job it needs failed is reported as skipped,
+# and a skipped required check does not block the merge.
+#
+# The source of truth for this file is packaging/homebrew-tap/ in the
+# private Advoura repository, where tests run this file's shell. Change it
+# there first, then copy it here unchanged.
+name: tap-ci
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cask-guard:
+    name: cask-guard
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      # TODO(pin, runbook §8 first-release checklist): pin to a full commit SHA.
+      - name: Checkout (full history for diff against main)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Step 1 -- scope
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # cask_scope_check BASE HEAD: succeeds only if every difference
+          # between the two files is an in-place rewrite (diff hunk NcN or
+          # N,McN,M with equal ranges, so no line added or deleted) of the
+          # version line and/or the sha256 line, each matched as a whole
+          # line, each changed at most once, old and new lines pairing up
+          # field for field.
+          cask_scope_check() {
+            local base="$1" head="$2" difffile line body kind
+            local olds="" news=""
+            local hunk_re='^([0-9]+)(,([0-9]+))?c([0-9]+)(,([0-9]+))?$'
+            difffile="$(mktemp)"
+            diff "$base" "$head" >"$difffile" || true
+            if [ ! -s "$difffile" ]; then
+              echo "FAIL: the cask did not change" >&2
+              return 1
+            fi
+            while IFS= read -r line; do
+              case "$line" in
+                '< '* | '> '*)
+                  body="${line#??}"
+                  if printf '%s\n' "$body" | grep -qxE '  version "[0-9]+\.[0-9]+\.[0-9]+"'; then
+                    kind=version
+                  elif printf '%s\n' "$body" | grep -qxE '  sha256 "[0-9a-f]{64}"'; then
+                    kind=sha256
+                  else
+                    echo "FAIL: a changed line is neither the version line nor the sha256 line: $body" >&2
+                    return 1
+                  fi
+                  case "$line" in
+                    '< '*) olds="$olds $kind" ;;
+                    *) news="$news $kind" ;;
+                  esac
+                  ;;
+                '---') ;;
+                *)
+                  if [[ "$line" =~ $hunk_re ]] &&
+                    [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[4]}" ] &&
+                    [ "${BASH_REMATCH[3]}" = "${BASH_REMATCH[6]}" ]; then
+                    :
+                  else
+                    echo "FAIL: diff hunk is not an in-place change of the same lines: $line" >&2
+                    return 1
+                  fi
+                  ;;
+              esac
+            done <"$difffile"
+            rm -f "$difffile"
+            if [ "$olds" != "$news" ]; then
+              echo "FAIL: changed lines do not pair up field for field (old:$olds / new:$news)" >&2
+              return 1
+            fi
+            case "$news" in
+              *version*version* | *sha256*sha256*)
+                echo "FAIL: the same field changed more than once" >&2
+                return 1
+                ;;
+            esac
+            return 0
+          }
+
+          CHANGED="$(git diff --no-renames --name-only "origin/$BASE_REF...HEAD")"
+          echo "Changed files:"
+          echo "$CHANGED"
+          if [ "$CHANGED" != "Casks/advoura.rb" ]; then
+            echo "FAIL: this PR must change exactly Casks/advoura.rb and nothing else" >&2
+            exit 1
+          fi
+          if [ ! -f Casks/advoura.rb ] || [ -L Casks/advoura.rb ]; then
+            echo "FAIL: Casks/advoura.rb must exist at the PR head as a regular file" >&2
+            exit 1
+          fi
+          if git cat-file -e "origin/$BASE_REF:Casks/advoura.rb" 2>/dev/null; then
+            git show "origin/$BASE_REF:Casks/advoura.rb" >"$RUNNER_TEMP/base_cask.rb"
+            if ! cask_scope_check "$RUNNER_TEMP/base_cask.rb" Casks/advoura.rb; then
+              diff "$RUNNER_TEMP/base_cask.rb" Casks/advoura.rb >&2 || true
+              exit 1
+            fi
+          else
+            echo "No cask on $BASE_REF yet -- bootstrap PR; step 1b checks it against the template"
+          fi
+          echo "OK: step 1 (scope)"
+
+      - name: Step 1b -- first cask matches the template
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if git cat-file -e "origin/$BASE_REF:Casks/advoura.rb" 2>/dev/null; then
+            echo "Cask already exists on $BASE_REF -- not the first cask, step 1 already limited the change"
+            exit 0
+          fi
+          # The template, held here rather than read from the repository (a PR
+          # can change any file outside .github/workflows/). Kept identical to
+          # packaging/homebrew-tap/Casks/advoura.rb.template by a test in the
+          # Advoura repository.
+          cat >"$RUNNER_TEMP/advoura.rb.template" <<'TEMPLATE_EOF'
+          cask "advoura" do
+            # version and sha256 are written by the release pipeline from the bytes it
+            # uploaded, never typed by hand. Keep both lines bare (no trailing comment):
+            # cask-guard matches them as whole lines.
+            version "{{VERSION}}"
+            sha256 "{{SHA256}}"
+
+            # Immutable, versioned key. Never "latest". The "aarch64" segment matches
+            # the bundler's own naming so one glance at the URL confirms which
+            # artifact this is.
+            # No `verified:` -- downloads.advoura.com is under the homepage's own
+            # domain, so `brew audit` flags `verified:` as unnecessary.
+            url "https://downloads.advoura.com/releases/#{version}/Advoura_#{version}_aarch64.dmg"
+            name "Advoura"
+            desc "Offline reader for your own medical records"
+            homepage "https://advoura.com/"
+
+            # Apple Silicon only. `aarch64` is hard-coded in the URL above, and this
+            # stanza is what actually refuses an Intel Mac.
+            depends_on arch: :arm64
+            # Floor: macOS 11 Big Sur -- the oldest macOS current Homebrew runs on,
+            # and arm64 macOS starts at 11 regardless.
+            depends_on :macos
+
+            # The app has no updater and no update check of any kind. Leave
+            # `auto_updates` at its default (false) on purpose.
+
+            app "Advoura.app"
+
+            # Zap intentionally never touches the app's own local data directory,
+            # where the encrypted record database, its lock file and the provider
+            # directory cache live. Only ordinary OS-level app traces below.
+            zap trash: [
+              "~/Library/Caches/com.advoura",
+              "~/Library/Saved Application State/com.advoura.savedState",
+              "~/Library/HTTPStorages/com.advoura",
+            ]
+
+            livecheck do
+              url "https://downloads.advoura.com/releases/latest.json"
+              strategy :json do |json|
+                json["version"]
+              end
+            end
+          end
+          TEMPLATE_EOF
+          VERSION="$(sed -nE 's/^  version "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' Casks/advoura.rb)"
+          SHA256="$(sed -nE 's/^  sha256 "([0-9a-f]{64})"$/\1/p' Casks/advoura.rb)"
+          if [ "$(printf '%s' "$VERSION" | grep -c '')" != 1 ] || [ "$(printf '%s' "$SHA256" | grep -c '')" != 1 ]; then
+            echo "FAIL: bootstrap cask must carry exactly one well-formed version line and one sha256 line" >&2
+            exit 1
+          fi
+          sed -e "s/{{VERSION}}/$VERSION/" -e "s/{{SHA256}}/$SHA256/" "$RUNNER_TEMP/advoura.rb.template" >"$RUNNER_TEMP/expected.rb"
+          if ! cmp -s "$RUNNER_TEMP/expected.rb" Casks/advoura.rb; then
+            echo "FAIL: bootstrap cask differs from the approved template:" >&2
+            diff "$RUNNER_TEMP/expected.rb" Casks/advoura.rb >&2 || true
+            exit 1
+          fi
+          # Belt and braces: the zap stanza alone must never reach the app's
+          # data directory.
+          if sed -n '/^  zap /,/^  \]/p' Casks/advoura.rb | grep -qi 'Application Support'; then
+            echo "FAIL: zap reaches Application Support" >&2
+            exit 1
+          fi
+          echo "OK: step 1b (first cask equals the template)"
+
+      # Steps 2-4 read the cask as plain text: each field must match its
+      # strict whole-line pattern exactly once.
+      - name: Steps 2-4 -- host, path, hash
+        id: hostpathhash
+        run: |
+          set -euo pipefail
+          count() { printf '%s' "$1" | grep -c '' || true; }
+          VERSION="$(sed -nE 's/^  version "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' Casks/advoura.rb)"
+          SHA256="$(sed -nE 's/^  sha256 "([0-9a-f]{64})"$/\1/p' Casks/advoura.rb)"
+          URL_LINE="$(sed -nE '/^  url "/p' Casks/advoura.rb)"
+          for pair in "version:$VERSION" "sha256:$SHA256" "url:$URL_LINE"; do
+            if [ "$(count "${pair#*:}")" != 1 ]; then
+              echo "FAIL: expected exactly one strict ${pair%%:*} line in Casks/advoura.rb" >&2
+              exit 1
+            fi
+          done
+          # No second, differently-shaped version/sha256 call anywhere.
+          if [ "$(grep -cE '^[[:space:]]*version[[:space:](]' Casks/advoura.rb || true)" != 1 ] ||
+            [ "$(grep -cE '^[[:space:]]*sha256[[:space:](]' Casks/advoura.rb || true)" != 1 ]; then
+            echo "FAIL: Casks/advoura.rb has more than one version or sha256 call" >&2
+            exit 1
+          fi
+          EXPECTED_URL='  url "https://downloads.advoura.com/releases/#{version}/Advoura_#{version}_aarch64.dmg"'
+          if [ "$URL_LINE" != "$EXPECTED_URL" ]; then
+            echo "FAIL: (a)/(b) url line does not match the expected host and path" >&2
+            echo "  got:      $URL_LINE" >&2
+            echo "  expected: $EXPECTED_URL" >&2
+            exit 1
+          fi
+          echo "OK: (a) host is downloads.advoura.com, (b) path is /releases/<version>/Advoura_<version>_aarch64.dmg"
+
+          SUMS_URL="https://downloads.advoura.com/releases/$VERSION/SHA256SUMS.txt"
+          echo "Fetching $SUMS_URL (public read, no credential)"
+          curl -fsSL --retry 3 "$SUMS_URL" -o "$RUNNER_TEMP/SHA256SUMS.txt"
+          DMG_NAME="Advoura_${VERSION}_aarch64.dmg"
+          EXPECTED_SHA="$(awk -v n="$DMG_NAME" 'NF == 2 && $2 == n { print $1 }' "$RUNNER_TEMP/SHA256SUMS.txt")"
+          if [ "$(count "$EXPECTED_SHA")" != 1 ] || ! printf '%s\n' "$EXPECTED_SHA" | grep -qxE '[0-9a-f]{64}'; then
+            echo "FAIL: SHA256SUMS.txt for $VERSION does not have exactly one entry for $DMG_NAME" >&2
+            exit 1
+          fi
+          if [ "$SHA256" != "$EXPECTED_SHA" ]; then
+            echo "FAIL: (c) cask sha256 ($SHA256) does not match SHA256SUMS.txt ($EXPECTED_SHA) for $DMG_NAME" >&2
+            exit 1
+          fi
+          echo "OK: (c) sha256 matches the published SHA256SUMS.txt"
+          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+
+      # Step 5: (d) no downgrade. Numeric, field by field -- never a string
+      # comparison. version_gt's body must stay identical (ignoring
+      # indentation) to scripts/homebrew-version-gt.sh in the Advoura
+      # repository; a test there compares them.
+      - name: Step 5 -- no downgrade (numeric, field by field)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          NEW_VERSION: ${{ steps.hostpathhash.outputs.version }}
+        run: |
+          set -euo pipefail
+          version_gt() {
+            local new="$1" old="$2"
+            local n1 n2 n3 o1 o2 o3
+            IFS='.' read -r n1 n2 n3 <<<"$new"
+            IFS='.' read -r o1 o2 o3 <<<"$old"
+            for v in "$n1" "$n2" "$n3" "$o1" "$o2" "$o3"; do
+              case "$v" in
+                ''|*[!0-9]*) return 2 ;;
+              esac
+            done
+            if [ "$n1" -gt "$o1" ]; then return 0; fi
+            if [ "$n1" -lt "$o1" ]; then return 1; fi
+            if [ "$n2" -gt "$o2" ]; then return 0; fi
+            if [ "$n2" -lt "$o2" ]; then return 1; fi
+            if [ "$n3" -gt "$o3" ]; then return 0; fi
+            return 1
+          }
+          if git cat-file -e "origin/$BASE_REF:Casks/advoura.rb" 2>/dev/null; then
+            git show "origin/$BASE_REF:Casks/advoura.rb" >"$RUNNER_TEMP/base_cask.rb"
+            OLD_VERSION="$(sed -nE 's/^  version "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' "$RUNNER_TEMP/base_cask.rb")"
+            if version_gt "$NEW_VERSION" "$OLD_VERSION"; then
+              echo "OK: (d) $NEW_VERSION > $OLD_VERSION (numeric)"
+            else
+              echo "FAIL: (d) $NEW_VERSION is not numerically greater than $BASE_REF's $OLD_VERSION -- refusing a downgrade or no-op" >&2
+              exit 1
+            fi
+          else
+            echo "No cask on $BASE_REF yet -- nothing to compare against (bootstrap PR)"
+          fi
+
+      # Step 6, last: only now is the cask evaluated as Ruby.
+      # TODO(pin, runbook §8 first-release checklist): replace @master with a
+      # full commit SHA of Homebrew/actions. Not resolved offline when this
+      # file was written; do not guess one.
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Tap this checkout as advoura/tap
+        run: |
+          set -euo pipefail
+          TAPS="$(brew --repository)/Library/Taps"
+          if [ ! -e "$TAPS/advoura/homebrew-tap" ]; then
+            mkdir -p "$TAPS/advoura"
+            ln -s "$GITHUB_WORKSPACE" "$TAPS/advoura/homebrew-tap"
+          fi
+          # The tap must be THIS checkout, so audit reads the PR's cask.
+          test "$(cd "$TAPS/advoura/homebrew-tap" && pwd -P)" = "$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          brew tap | grep -qx 'advoura/tap'
+
+      - name: Step 6 -- brew style
+        run: brew style --cask advoura/tap/advoura
+
+      # --except=livecheck_version: on a bump PR, releases/latest.json still
+      # names the previous version until after the merge (design §4.1 step
+      # 6), so the livecheck-version audit would reject every bump. Nothing
+      # is lost: step (c) already ties the version to the immutable
+      # SHA256SUMS.txt on R2.
+      - name: Step 6 -- brew audit --cask --strict --online
+        run: brew audit --cask --strict --online --except=livecheck_version advoura/tap/advoura
