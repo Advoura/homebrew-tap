@@ -6,9 +6,14 @@ desktop reader for your own medical records.
 ## Install
 
 ```
-brew tap advoura/tap
-brew install --cask advoura
+brew install --cask advoura/tap/advoura
 ```
+
+The fully qualified name taps `advoura/tap` and installs in one step.
+Installing by the short name instead (`brew tap advoura/tap`, then
+`brew install --cask advoura`) makes current Homebrew refuse with
+"Refusing to load cask advoura/tap/advoura from untrusted tap advoura/tap"
+until you run `brew trust advoura/tap`, which trusts this tap only.
 
 Apple Silicon Macs only, macOS 11 (Big Sur) or later.
 
