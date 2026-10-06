@@ -320,10 +320,14 @@ jobs:
       - name: Step 6 -- brew style
         run: brew style --cask advoura/tap/advoura
 
-      # --except=livecheck_version: on a bump PR, releases/latest.json still
-      # names the previous version until after the merge (design §4.1 step
-      # 6), so the livecheck-version audit would reject every bump. Nothing
-      # is lost: step (c) already ties the version to the immutable
-      # SHA256SUMS.txt on R2.
+      # --except=livecheck_version,livecheck_https_availability: on a bump PR,
+      # releases/latest.json still names the previous version until after the
+      # merge (design §4.1 step 6), so the livecheck-version audit would reject
+      # every bump. Both must be excepted: livecheck_https_availability calls
+      # audit_livecheck_version directly (Homebrew cask/audit.rb), which
+      # bypasses an except of livecheck_version alone -- that is how v0.3.2's
+      # bootstrap PR failed with "differs from '' retrieved by livecheck".
+      # Nothing is lost: step (c) already ties the version to the immutable
+      # SHA256SUMS.txt on R2, and the livecheck URL is our own HTTPS domain.
       - name: Step 6 -- brew audit --cask --strict --online
-        run: brew audit --cask --strict --online --except=livecheck_version advoura/tap/advoura
+        run: brew audit --cask --strict --online --except=livecheck_version,livecheck_https_availability advoura/tap/advoura
