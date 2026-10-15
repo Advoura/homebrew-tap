@@ -2,8 +2,8 @@ cask "advoura" do
   # version and sha256 are written by the release pipeline from the bytes it
   # uploaded, never typed by hand. Keep both lines bare (no trailing comment):
   # cask-guard matches them as whole lines.
-  version "0.4.0"
-  sha256 "673fd77027b26bf1a03c4c1a9b02f5b4d75be87e0623f4e3d5a723788b074561"
+  version "0.5.5"
+  sha256 "c93a98dafd4c6ae5b942b22589fe7858976fd6b6d6e3082d2a8e5076a528a0ee"
 
   # Immutable, versioned key. Never "latest". The "aarch64" segment matches
   # the bundler's own naming so one glance at the URL confirms which
